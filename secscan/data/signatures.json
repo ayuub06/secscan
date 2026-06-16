@@ -1,0 +1,74 @@
+[
+  {
+    "name": "phpMyAdmin",
+    "path": "/phpmyadmin/",
+    "match_type": "content_contains",
+    "match_value": "phpMyAdmin",
+    "severity": "HIGH",
+    "description": "phpMyAdmin provides a web interface for direct database access and management; public exposure allows brute-force attacks and may lead to full database compromise.",
+    "remediation": "Move phpMyAdmin behind a VPN or IP allowlist, or remove it entirely from internet-facing servers and use a local or tunnelled connection instead."
+  },
+  {
+    "name": ".env file",
+    "path": "/.env",
+    "match_type": "status_code",
+    "match_value": 200,
+    "severity": "CRITICAL",
+    "description": "An exposed .env file typically contains plaintext application secrets: database credentials, API keys, encryption keys, and third-party service tokens.",
+    "remediation": "Remove this file from the publicly served directory immediately and rotate every credential and key it contained, as they must be considered fully compromised."
+  },
+  {
+    "name": ".git config",
+    "path": "/.git/config",
+    "match_type": "content_contains",
+    "match_value": "[core]",
+    "severity": "CRITICAL",
+    "description": "An exposed .git directory allows an attacker to reconstruct the full source code history, including secrets that were committed and later deleted, and all configuration details.",
+    "remediation": "Remove or block the .git directory from web-accessible paths immediately. Treat all previously committed secrets as compromised and rotate them."
+  },
+  {
+    "name": "WordPress admin",
+    "path": "/wp-admin/",
+    "match_type": "status_code",
+    "match_value": 302,
+    "severity": "MEDIUM",
+    "description": "WordPress admin login endpoint is publicly reachable. While this is common for WordPress sites, it is a target for credential stuffing and brute-force attacks.",
+    "remediation": "Add IP allowlisting, two-factor authentication, or a WAF rule limiting login attempts. Consider moving wp-login.php to a non-standard path."
+  },
+  {
+    "name": "Jenkins",
+    "path": "/jenkins/",
+    "match_type": "content_contains",
+    "match_value": "Jenkins",
+    "severity": "HIGH",
+    "description": "Jenkins automation server is publicly accessible. Depending on version and configuration, this may allow unauthenticated job execution, credential exposure, or remote code execution.",
+    "remediation": "Place Jenkins behind a VPN or IP allowlist. Ensure authentication is enforced and the instance is on a current, patched version."
+  },
+  {
+    "name": "Tomcat Manager",
+    "path": "/manager/html",
+    "match_type": "content_contains",
+    "match_value": "Tomcat Web Application Manager",
+    "severity": "HIGH",
+    "description": "The Tomcat manager interface is publicly accessible. It allows deployment of arbitrary WAR files, which can trivially achieve remote code execution.",
+    "remediation": "Restrict the /manager path to localhost or an internal network only. Never expose Tomcat Manager to the internet."
+  },
+  {
+    "name": "Generic admin panel",
+    "path": "/admin/",
+    "match_type": "status_code",
+    "match_value": 200,
+    "severity": "MEDIUM",
+    "description": "A generic admin interface was found publicly accessible. This may be an intentional public-facing login page or an inadvertent exposure of an internal management panel.",
+    "remediation": "Restrict access via IP allowlist, VPN, or additional authentication. If the panel is not intended to be public, remove it from the internet-facing configuration."
+  },
+  {
+    "name": "Apache server-status",
+    "path": "/server-status",
+    "match_type": "content_contains",
+    "match_value": "Apache Server Status",
+    "severity": "MEDIUM",
+    "description": "Apache mod_status exposes real-time server metrics including active requests, client IP addresses, and full request URIs, which significantly aids attacker reconnaissance.",
+    "remediation": "Disable mod_status or restrict access to trusted IPs only via 'Require ip 127.0.0.1' in the Apache configuration."
+  }
+]

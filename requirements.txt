@@ -1,0 +1,10 @@
+python-nmap
+requests
+sqlalchemy
+python-dotenv
+pyyaml
+jinja2
+weasyprint
+dnspython
+sslyze
+rich
