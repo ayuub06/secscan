@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 data/cve_cache.db
 report.json
+report_test.*
 *.db
 .env

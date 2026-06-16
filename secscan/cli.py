@@ -18,6 +18,7 @@ import sys
 from checks import admin_panels, cve_lookup, dns_check, http_headers, port_scan, tls_check
 from core.orchestrator import ScanOrchestrator
 from core.target import UnauthorizedScanError
+from reports.generator import generate_html, generate_pdf
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -49,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--format",
-        choices=["html", "json"],
+        choices=["html", "json", "pdf"],
         default="html",
         help="Report format (default: html).",
     )
@@ -149,23 +150,24 @@ def main() -> None:
     print("=" * 60)
 
     # ── Write report ──────────────────────────────────────────────────────────
-    # TODO: wire up reports/generator.py for HTML output once that module is
-    # written.  Currently always outputs JSON regardless of --format flag.
     output_path = args.output
-    if args.format == "html" and not output_path.endswith(".json"):
-        # Adjust extension so the file isn't a .html file containing raw JSON
-        output_path = output_path.rsplit(".", 1)[0] + ".json"
-        logger.info(
-            "HTML report generator not yet implemented — writing JSON to %s instead.",
-            output_path,
-        )
 
     try:
-        with open(output_path, "w", encoding="utf-8") as fh:
-            json.dump(scan_result.to_dict(), fh, indent=2, ensure_ascii=False)
+        if args.format == "json":
+            with open(output_path, "w", encoding="utf-8") as fh:
+                json.dump(scan_result.to_dict(), fh, indent=2, ensure_ascii=False)
+        elif args.format == "html":
+            html_content = generate_html(scan_result)
+            with open(output_path, "w", encoding="utf-8") as fh:
+                fh.write(html_content)
+        elif args.format == "pdf":
+            generate_pdf(scan_result, output_path)
         print(f"\n  Report written to: {output_path}")
     except OSError as exc:
         logger.error("Failed to write report to %r: %s", output_path, exc)
+        sys.exit(1)
+    except Exception as exc:
+        logger.error("Report generation failed: %s", exc)
         sys.exit(1)
 
 
