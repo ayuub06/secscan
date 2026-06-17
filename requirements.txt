@@ -8,3 +8,5 @@ weasyprint
 dnspython
 sslyze
 rich
+flask
+flask-cors

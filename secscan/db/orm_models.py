@@ -22,7 +22,9 @@ class Client(Base):
         default=lambda: datetime.now(timezone.utc),
     )
 
-    targets: Mapped[list[Target]] = relationship("Target", back_populates="client")
+    targets: Mapped[list[Target]] = relationship(
+        "Target", back_populates="client", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Client id={self.id} name={self.name!r}>"
@@ -47,7 +49,9 @@ class Target(Base):
     )
 
     client: Mapped[Client] = relationship("Client", back_populates="targets")
-    scan_runs: Mapped[list[ScanRun]] = relationship("ScanRun", back_populates="target")
+    scan_runs: Mapped[list[ScanRun]] = relationship(
+        "ScanRun", back_populates="target", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Target id={self.id} scope={self.scope!r} client_id={self.client_id}>"
