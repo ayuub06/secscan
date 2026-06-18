@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security Scan Report &#8212; be273ace</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #334155;
+    background: #f1f5f9;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+.report-header {
+    background: #0f172a;
+    color: #ffffff;
+    padding: 36px 48px 28px;
+}
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+}
+.header-brand {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #64748b;
+    margin-bottom: 8px;
+}
+.header-title {
+    font-size: 28px;
+    font-weight: 800;
+    color: #f1f5f9;
+}
+.header-scan-id { text-align: right; }
+.header-scan-id .label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #475569;
+    margin-bottom: 4px;
+}
+.header-scan-id .value {
+    font-size: 12px;
+    color: #94a3b8;
+    font-family: "Courier New", Courier, monospace;
+    word-break: break-all;
+    max-width: 360px;
+}
+.header-sub {
+    font-size: 12px;
+    color: #475569;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #1e293b;
+}
+
+/* ── Content wrapper ──────────────────────────────────────────────────── */
+.content {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 48px 48px;
+}
+
+/* ── Card ─────────────────────────────────────────────────────────────── */
+.card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 24px;
+}
+.card-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #94a3b8;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+/* ── Scan info ────────────────────────────────────────────────────────── */
+.info-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+.info-item { flex: 1; min-width: 180px; }
+.info-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #94a3b8;
+    margin-bottom: 4px;
+}
+.info-value {
+    font-size: 13px;
+    color: #1e293b;
+    font-weight: 500;
+}
+.info-value.mono {
+    font-family: "Courier New", Courier, monospace;
+    font-size: 12px;
+    color: #334155;
+}
+
+/* ── Summary row ──────────────────────────────────────────────────────── */
+.summary-row {
+    display: flex;
+    gap: 12px;
+}
+.sev-box {
+    flex: 1;
+    border-radius: 8px;
+    padding: 18px 10px;
+    text-align: center;
+    color: #ffffff;
+}
+.sev-count {
+    display: block;
+    font-size: 34px;
+    font-weight: 900;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.sev-label {
+    display: block;
+    font-size: 9px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    opacity: 0.9;
+}
+
+/* ── Findings heading ─────────────────────────────────────────────────── */
+.section-heading {
+    font-size: 17px;
+    font-weight: 700;
+    color: #1e293b;
+    margin: 8px 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.total-badge {
+    font-size: 12px;
+    font-weight: 600;
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+}
+.no-findings {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 15px;
+    padding: 48px 0;
+    font-style: italic;
+}
+
+/* ── Finding card ─────────────────────────────────────────────────────── */
+.finding-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-left: 5px solid #94a3b8;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+    page-break-inside: avoid;
+}
+.finding-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+.sev-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #ffffff;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-top: 3px;
+}
+.finding-title-block { flex: 1; }
+.finding-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #1e293b;
+    line-height: 1.4;
+}
+.finding-target {
+    font-size: 12px;
+    color: #64748b;
+    font-family: "Courier New", Courier, monospace;
+    margin-top: 3px;
+}
+
+/* ── Field blocks ─────────────────────────────────────────────────────── */
+.field-group { margin-bottom: 14px; }
+.field-group:last-child { margin-bottom: 0; }
+.field-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #94a3b8;
+    margin-bottom: 5px;
+}
+.field-text {
+    font-size: 13px;
+    color: #334155;
+    line-height: 1.65;
+}
+.evidence-box {
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 12px;
+    color: #334155;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.remediation-box {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-left: 4px solid #22c55e;
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-size: 13px;
+    color: #166534;
+    line-height: 1.65;
+}
+
+/* ── CVE tags ─────────────────────────────────────────────────────────── */
+.cve-list { margin-top: 4px; }
+.cve-tag {
+    display: inline-block;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1d4ed8;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin: 2px 4px 2px 0;
+    font-family: "Courier New", Courier, monospace;
+}
+
+/* ── Footer ───────────────────────────────────────────────────────────── */
+.report-footer {
+    border-top: 1px solid #e2e8f0;
+    margin-top: 48px;
+    padding: 24px 0 8px;
+    text-align: center;
+}
+.footer-disclaimer {
+    font-size: 11px;
+    color: #94a3b8;
+    max-width: 660px;
+    margin: 0 auto 10px;
+    line-height: 1.7;
+}
+.footer-timestamp {
+    font-size: 11px;
+    color: #cbd5e1;
+    font-family: "Courier New", Courier, monospace;
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────────────────── -->
+<div class="report-header">
+    <div class="header-top">
+        <div>
+            <div class="header-brand">secscan &middot; Automated Security Scanner</div>
+            <div class="header-title">Security Scan Report</div>
+        </div>
+        <div class="header-scan-id">
+            <div class="label">Scan ID</div>
+            <div class="value">be273ace-b5d0-4ce8-92ed-93cbfef1df1f</div>
+        </div>
+    </div>
+    <div class="header-sub">
+        Report generated: 2026-06-17T10:37:00.502509+00:00&nbsp;&nbsp;&bull;&nbsp;&nbsp;Authorized by: self-test
+    </div>
+</div>
+
+<div class="content">
+
+<!-- ── Scan details ───────────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-title">Scan Details</div>
+    <div class="info-grid">
+        <div class="info-item">
+            <div class="info-label">Target Scope</div>
+            <div class="info-value mono">127.0.0.1</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Authorized By</div>
+            <div class="info-value">self-test</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Scan Started</div>
+            <div class="info-value mono">2026-06-17T10:36:49.315983+00:00</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Scan Completed</div>
+            <div class="info-value mono">2026-06-17T10:37:00.458983+00:00</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Checks Run</div>
+            <div class="info-value">port_scan, tls_check, http_headers, dns_check, admin_panels</div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Summary ────────────────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-title">Findings Summary</div>
+    <div class="summary-row">
+        
+        <div class="sev-box" style="background: #dc2626;">
+            <span class="sev-count">1</span>
+            <span class="sev-label">CRITICAL</span>
+        </div>
+        
+        <div class="sev-box" style="background: #ea580c;">
+            <span class="sev-count">1</span>
+            <span class="sev-label">HIGH</span>
+        </div>
+        
+        <div class="sev-box" style="background: #d97706;">
+            <span class="sev-count">0</span>
+            <span class="sev-label">MEDIUM</span>
+        </div>
+        
+        <div class="sev-box" style="background: #65a30d;">
+            <span class="sev-count">0</span>
+            <span class="sev-label">LOW</span>
+        </div>
+        
+        <div class="sev-box" style="background: #0891b2;">
+            <span class="sev-count">2</span>
+            <span class="sev-label">INFO</span>
+        </div>
+        
+    </div>
+</div>
+
+<!-- ── Findings ───────────────────────────────────────────────────────────── -->
+<div class="section-heading">
+    Findings
+    <span class="total-badge">4 total</span>
+</div>
+
+
+
+<div class="finding-card" style="border-left-color: #dc2626;">
+    <div class="finding-header">
+        <span class="sev-badge" style="background: #dc2626;">
+            CRITICAL
+        </span>
+        <div class="finding-title-block">
+            <div class="finding-title">Open port 445 (SMB)</div>
+            <div class="finding-target">
+                127.0.0.1:445
+            </div>
+        </div>
+    </div>
+
+    <div class="field-group">
+        <div class="field-label">Description</div>
+        <div class="field-text">SMB exposed publicly has been the vector for major worms like WannaCry.</div>
+    </div>
+
+    
+    <div class="field-group">
+        <div class="field-label">Evidence</div>
+        <pre class="evidence-box">microsoft-ds</pre>
+    </div>
+    
+
+    <div class="field-group">
+        <div class="field-label">Remediation</div>
+        <div class="remediation-box">Restrict access via firewall to known IPs or disable the service if not required publicly.</div>
+    </div>
+
+    
+</div>
+
+<div class="finding-card" style="border-left-color: #ea580c;">
+    <div class="finding-header">
+        <span class="sev-badge" style="background: #ea580c;">
+            HIGH
+        </span>
+        <div class="finding-title-block">
+            <div class="finding-title">Open port 3306 (MySQL)</div>
+            <div class="finding-target">
+                127.0.0.1:3306
+            </div>
+        </div>
+    </div>
+
+    <div class="field-group">
+        <div class="field-label">Description</div>
+        <div class="field-text">Database port exposed publicly allows direct connection attempts.</div>
+    </div>
+
+    
+    <div class="field-group">
+        <div class="field-label">Evidence</div>
+        <pre class="evidence-box">mysql</pre>
+    </div>
+    
+
+    <div class="field-group">
+        <div class="field-label">Remediation</div>
+        <div class="remediation-box">Restrict access via firewall to known IPs or disable the service if not required publicly.</div>
+    </div>
+
+    
+</div>
+
+<div class="finding-card" style="border-left-color: #0891b2;">
+    <div class="finding-header">
+        <span class="sev-badge" style="background: #0891b2;">
+            INFO
+        </span>
+        <div class="finding-title-block">
+            <div class="finding-title">Open port 135 (msrpc)</div>
+            <div class="finding-target">
+                127.0.0.1:135
+            </div>
+        </div>
+    </div>
+
+    <div class="field-group">
+        <div class="field-label">Description</div>
+        <div class="field-text">Open port detected, manual review recommended.</div>
+    </div>
+
+    
+    <div class="field-group">
+        <div class="field-label">Evidence</div>
+        <pre class="evidence-box">msrpc</pre>
+    </div>
+    
+
+    <div class="field-group">
+        <div class="field-label">Remediation</div>
+        <div class="remediation-box">Review whether this service needs to be publicly accessible.</div>
+    </div>
+
+    
+</div>
+
+<div class="finding-card" style="border-left-color: #0891b2;">
+    <div class="finding-header">
+        <span class="sev-badge" style="background: #0891b2;">
+            INFO
+        </span>
+        <div class="finding-title-block">
+            <div class="finding-title">Open port 5000 (upnp)</div>
+            <div class="finding-target">
+                127.0.0.1:5000
+            </div>
+        </div>
+    </div>
+
+    <div class="field-group">
+        <div class="field-label">Description</div>
+        <div class="field-text">Open port detected, manual review recommended.</div>
+    </div>
+
+    
+    <div class="field-group">
+        <div class="field-label">Evidence</div>
+        <pre class="evidence-box">upnp</pre>
+    </div>
+    
+
+    <div class="field-group">
+        <div class="field-label">Remediation</div>
+        <div class="remediation-box">Review whether this service needs to be publicly accessible.</div>
+    </div>
+
+    
+</div>
+
+
+
+<!-- ── Footer ─────────────────────────────────────────────────────────────── -->
+<div class="report-footer">
+    <p class="footer-disclaimer">
+        This report was produced by an automated security scanner. Findings have not been
+        manually verified and may include false positives. All critical and high-severity
+        findings should be reviewed and validated by a qualified security professional
+        before remediation action is taken.
+    </p>
+    <div class="footer-timestamp">Generated 2026-06-17T10:37:00.502509+00:00 &mdash; secscan</div>
+</div>
+
+</div><!-- /.content -->
+</body>
+</html>

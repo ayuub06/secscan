@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+if TYPE_CHECKING:
+    from db.user_model import User
 
 
 class Base(DeclarativeBase):
@@ -17,6 +20,7 @@ class Client(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     contact_email: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -25,6 +29,7 @@ class Client(Base):
     targets: Mapped[list[Target]] = relationship(
         "Target", back_populates="client", cascade="all, delete-orphan"
     )
+    user: Mapped[Optional["User"]] = relationship("User", back_populates="clients")
 
     def __repr__(self) -> str:
         return f"<Client id={self.id} name={self.name!r}>"

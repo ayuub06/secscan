@@ -10,3 +10,4 @@ sslyze
 rich
 flask
 flask-cors
+authlib

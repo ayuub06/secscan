@@ -11,6 +11,7 @@ Or via the venv:
     .venv/Scripts/python.exe secscan/web/app.py   (from project root)
 """
 
+import functools
 import json
 import logging
 import os
@@ -23,7 +24,19 @@ from datetime import datetime, timezone
 # resolve correctly regardless of where this script is invoked from.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, jsonify, request
+# Load .env before anything reads os.environ.
+# The .env is at the project root (two levels above the secscan/ package dir).
+from dotenv import load_dotenv
+
+_env_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ".env",
+)
+# The .env file is UTF-16-LE encoded (Windows default for some editors).
+load_dotenv(dotenv_path=_env_path, encoding="utf-16")
+
+from authlib.integrations.flask_client import OAuth
+from flask import Flask, jsonify, redirect, request, session
 from flask_cors import CORS
 
 from checks import admin_panels, cve_lookup, dns_check, http_headers, port_scan, tls_check
@@ -31,11 +44,22 @@ from core.orchestrator import ScanOrchestrator
 from core.target import UnauthorizedScanError
 from db.database import SessionLocal, init_db
 from db.orm_models import Client, ScanRun, Target
+from db.user_model import User  # must be imported before init_db() so Base.metadata knows about users table
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
-CORS(app)
+# supports_credentials=True is required so browsers send the session cookie
+# with cross-origin requests from the React frontend (localhost:3000).
+CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
+app.secret_key = os.environ["FLASK_SECRET_KEY"]
+# Without these, Flask defaults to SameSite=None (or browser-dependent) and
+# Secure=True in some configurations. On http://localhost (no TLS), Secure=True
+# silently drops the cookie, and SameSite=Strict blocks it on the cross-site
+# redirect back from Google. Lax + non-Secure is the correct posture for local
+# HTTP development.
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +68,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger("secscan.web")
 
+# User model is already imported above, so Base.metadata includes the users table.
 init_db()
+
+# ── OAuth ────────────────────────────────────────────────────────────────────
+
+oauth = OAuth(app)
+oauth.register(
+    name="google",
+    client_id=os.environ["GOOGLE_CLIENT_ID"],
+    client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid email profile"},
+)
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def login_required(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "Authentication required"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +104,7 @@ def _client_dict(client: Client) -> dict:
         "id": client.id,
         "name": client.name,
         "contact_email": client.contact_email,
+        "user_id": client.user_id,
         "created_at": _fmt_dt(client.created_at),
     }
 
@@ -143,9 +191,83 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/google/login", methods=["GET"])
+def google_login():
+    redirect_uri = os.environ["OAUTH_REDIRECT_URI"]
+    return oauth.google.authorize_redirect(redirect_uri)
+
+
+@app.route("/api/auth/google/callback", methods=["GET"])
+def google_callback():
+    try:
+        token = oauth.google.authorize_access_token(leeway=300)
+        user_info = token.get("userinfo") or {}
+        google_id = user_info.get("sub")
+        email = user_info.get("email")
+        name = user_info.get("name")
+
+        if not google_id or not email:
+            return jsonify({"error": "Google did not return required user info"}), 400
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter_by(google_id=google_id).first()
+            if user is None:
+                user = User(google_id=google_id, email=email, name=name)
+                db.add(user)
+            else:
+                user.email = email
+                user.name = name
+            db.commit()
+            db.refresh(user)
+            session["user_id"] = user.id
+        finally:
+            db.close()
+
+        logger.info("OAuth callback: session user_id set to %s, redirecting to dashboard", session.get("user_id"))
+        return redirect("http://localhost:3000/dashboard")
+
+    except Exception as exc:
+        logger.exception("OAuth callback failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def auth_me():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+
+    try:
+        db = SessionLocal()
+        try:
+            user = db.get(User, user_id)
+            if user is None:
+                session.clear()
+                return jsonify({"error": "User not found"}), 401
+            result = {"id": user.id, "email": user.email, "name": user.name}
+        finally:
+            db.close()
+
+        return jsonify(result), 200
+
+    except Exception as exc:
+        logger.exception("Error in /api/auth/me")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return jsonify({"status": "logged out"}), 200
+
+
 # ── Client endpoints ─────────────────────────────────────────────────────────
 
 @app.route("/api/clients", methods=["POST"])
+@login_required
 def create_client():
     try:
         data = request.get_json(silent=True) or {}
@@ -155,7 +277,11 @@ def create_client():
 
         db = SessionLocal()
         try:
-            client = Client(name=name, contact_email=data.get("contact_email"))
+            client = Client(
+                name=name,
+                contact_email=data.get("contact_email"),
+                user_id=session["user_id"],
+            )
             db.add(client)
             db.commit()
             db.refresh(client)
@@ -241,6 +367,7 @@ def delete_client(client_id):
 # ── Target endpoints ─────────────────────────────────────────────────────────
 
 @app.route("/api/targets", methods=["POST"])
+@login_required
 def create_target():
     try:
         data = request.get_json(silent=True) or {}
@@ -325,6 +452,7 @@ def delete_target(target_id):
 
 
 @app.route("/api/targets/<int:target_id>/scan", methods=["POST"])
+@login_required
 def trigger_scan(target_id):
     try:
         db = SessionLocal()
@@ -399,4 +527,6 @@ def get_scan_run(scan_run_id):
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    # load_dotenv=False: we already called load_dotenv() above with the correct
+    # encoding — prevent Flask from re-trying with its default UTF-8 encoding.
+    app.run(debug=True, port=5000, load_dotenv=False)

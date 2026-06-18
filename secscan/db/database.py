@@ -1,7 +1,7 @@
 import os
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from db.orm_models import Base
@@ -37,5 +37,16 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Create all tables defined in orm_models. Call explicitly — not on import."""
+    """Create all tables and apply any pending inline column migrations."""
     Base.metadata.create_all(engine)
+    _run_migrations()
+
+
+def _run_migrations() -> None:
+    """Idempotent inline migrations for schema changes that create_all() can't apply
+    to pre-existing tables (SQLite does not support ALTER COLUMN or DROP COLUMN)."""
+    with engine.connect() as conn:
+        existing = {col["name"] for col in inspect(engine).get_columns("clients")}
+        if "user_id" not in existing:
+            conn.execute(text("ALTER TABLE clients ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+            conn.commit()
