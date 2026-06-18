@@ -6,3 +6,4 @@ report.json
 report_test.*
 *.db
 .env
+latest_report.html
