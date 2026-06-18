@@ -42,6 +42,7 @@ from flask_cors import CORS
 from checks import admin_panels, cve_lookup, dns_check, http_headers, port_scan, tls_check
 from core.orchestrator import ScanOrchestrator
 from core.target import UnauthorizedScanError
+from core.verification import check_dns_verification, check_file_verification
 from db.database import SessionLocal, init_db
 from db.orm_models import Client, ScanRun, Target
 from db.user_model import User  # must be imported before init_db() so Base.metadata knows about users table
@@ -117,6 +118,10 @@ def _target_dict(target: Target) -> dict:
         "authorized_by": target.authorized_by,
         "schedule_cron": target.schedule_cron,
         "skip_cve": target.skip_cve,
+        "verification_token": target.verification_token,
+        "verified": target.verified,
+        "verification_method": target.verification_method,
+        "verified_at": _fmt_dt(target.verified_at),
         "created_at": _fmt_dt(target.created_at),
     }
 
@@ -451,6 +456,87 @@ def delete_target(target_id):
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/targets/<int:target_id>/verification-info", methods=["GET"])
+@login_required
+def get_verification_info(target_id):
+    try:
+        db = SessionLocal()
+        try:
+            target = db.get(Target, target_id)
+            if target is None:
+                return jsonify({"error": "Target not found"}), 404
+            if target.client.user_id != session["user_id"]:
+                return jsonify({"error": "Forbidden"}), 403
+            token = target.verification_token
+            domain = target.scope.split(",")[0].strip()
+            result = {
+                "target_id": target.id,
+                "verified": target.verified,
+                "verification_token": token,
+                "dns_instructions": {
+                    "record_type": "TXT",
+                    "name": f"_secscan-verify.{domain}",
+                    "value": f"secscan-verify-{token}",
+                    "note": "Add this TXT record to your DNS zone, then POST to /verify with {\"method\": \"dns\"}",
+                },
+                "file_instructions": {
+                    "path": "/.well-known/secscan-verify.txt",
+                    "content": f"secscan-verify-{token}",
+                    "note": f"Upload a file at https://{domain}/.well-known/secscan-verify.txt containing exactly the content above, then POST to /verify with {{\"method\": \"file\"}}",
+                },
+            }
+        finally:
+            db.close()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.exception("Error fetching verification info for target %d", target_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/targets/<int:target_id>/verify", methods=["POST"])
+@login_required
+def verify_target(target_id):
+    try:
+        data = request.get_json(silent=True) or {}
+        method = data.get("method")
+
+        db = SessionLocal()
+        try:
+            target = db.get(Target, target_id)
+            if target is None:
+                return jsonify({"error": "Target not found"}), 404
+            if target.client.user_id != session["user_id"]:
+                return jsonify({"error": "Forbidden"}), 403
+
+            if method not in ("dns", "file"):
+                return jsonify({"error": "method must be 'dns' or 'file'"}), 400
+
+            domain = target.scope.split(",")[0].strip()
+            token = target.verification_token
+
+            if method == "dns":
+                success = check_dns_verification(domain, token)
+            else:
+                success = check_file_verification(domain, token)
+
+            if success:
+                target.verified = True
+                target.verification_method = method
+                target.verified_at = datetime.now(timezone.utc)
+                db.commit()
+                return jsonify({"verified": True, "method": method}), 200
+            else:
+                return jsonify({
+                    "verified": False,
+                    "message": "Verification check failed, please ensure the DNS record or file is correctly set up and try again.",
+                }), 200
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.exception("Error verifying target %d", target_id)
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/targets/<int:target_id>/scan", methods=["POST"])
 @login_required
 def trigger_scan(target_id):
@@ -460,6 +546,15 @@ def trigger_scan(target_id):
             target = db.get(Target, target_id)
             if target is None:
                 return jsonify({"error": "Target not found"}), 404
+
+            # CRITICAL ENFORCEMENT POINT: this check is what actually prevents scanning
+            # unverified/unowned targets — login + the verification endpoints exist to
+            # support this one gate. Do not move or remove it.
+            if not target.verified:
+                return jsonify({
+                    "error": "Target is not verified. Complete domain ownership verification before scanning.",
+                    "verification_token": target.verification_token,
+                }), 403
 
             scan_run = ScanRun(
                 target_id=target.id,

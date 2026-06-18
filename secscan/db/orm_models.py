@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -48,6 +49,12 @@ class Target(Base):
     authorized_by: Mapped[str] = mapped_column(String, nullable=False)
     schedule_cron: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     skip_cve: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verification_token: Mapped[str] = mapped_column(
+        String, nullable=False, default=lambda: secrets.token_hex(16)
+    )
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verification_method: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

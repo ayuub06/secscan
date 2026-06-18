@@ -46,7 +46,23 @@ def _run_migrations() -> None:
     """Idempotent inline migrations for schema changes that create_all() can't apply
     to pre-existing tables (SQLite does not support ALTER COLUMN or DROP COLUMN)."""
     with engine.connect() as conn:
-        existing = {col["name"] for col in inspect(engine).get_columns("clients")}
-        if "user_id" not in existing:
+        existing_clients = {col["name"] for col in inspect(engine).get_columns("clients")}
+        if "user_id" not in existing_clients:
             conn.execute(text("ALTER TABLE clients ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+            conn.commit()
+
+        existing_targets = {col["name"] for col in inspect(engine).get_columns("targets")}
+        if "verification_token" not in existing_targets:
+            # Use SQLite's randomblob to backfill tokens for any pre-existing rows.
+            conn.execute(text("ALTER TABLE targets ADD COLUMN verification_token TEXT NOT NULL DEFAULT ''"))
+            conn.execute(text("UPDATE targets SET verification_token = lower(hex(randomblob(16))) WHERE verification_token = ''"))
+            conn.commit()
+        if "verified" not in existing_targets:
+            conn.execute(text("ALTER TABLE targets ADD COLUMN verified INTEGER NOT NULL DEFAULT 0"))
+            conn.commit()
+        if "verification_method" not in existing_targets:
+            conn.execute(text("ALTER TABLE targets ADD COLUMN verification_method TEXT"))
+            conn.commit()
+        if "verified_at" not in existing_targets:
+            conn.execute(text("ALTER TABLE targets ADD COLUMN verified_at DATETIME"))
             conn.commit()
