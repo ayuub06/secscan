@@ -78,12 +78,24 @@ def _scan_one(target: str, scan_id: str, findings: list[Finding]) -> None:
         sr = result.scan_result
 
         # ── Protocol & cipher suite analysis ─────────────────────────────────
-        modern_supported = False  # tracks whether TLS 1.2 or 1.3 accepted anything
+        modern_supported = False       # True if TLS 1.2 or 1.3 accepted at least one suite
+        modern_cmds_completed = 0      # how many modern-version commands reached COMPLETED
+        # Counts only COMPLETED commands; ERROR/TIMEOUT commands are excluded so that a
+        # server which terminates sslyze's per-cipher probes (e.g. CDN bot-detection) cannot
+        # silently drive modern_supported to False and trigger a false-positive CRITICAL finding.
 
         for version_label, attr, is_deprecated in _VERSION_CHECKS:
             attempt = getattr(sr, attr)
             if attempt.status != ScanCommandAttemptStatusEnum.COMPLETED:
+                if not is_deprecated and attempt.status.name == "ERROR":
+                    logger.debug(
+                        "tls_check: %s command errored for %r — skipping (bot-detection / network refusal likely)",
+                        version_label, target,
+                    )
                 continue
+
+            if not is_deprecated:
+                modern_cmds_completed += 1
 
             accepted = attempt.result.accepted_cipher_suites
 
@@ -139,8 +151,11 @@ def _scan_one(target: str, scan_id: str, findings: list[Finding]) -> None:
                         ),
                     ))
 
-        # b) No modern TLS at all (only old protocols supported — worse than a)
-        if not modern_supported:
+        # b) No modern TLS at all — only emit when we have reliable evidence.
+        # If both TLS 1.2 and TLS 1.3 commands errored (modern_cmds_completed == 0),
+        # the server likely rejected sslyze's per-cipher probes due to bot-detection or
+        # network policy.  Firing CRITICAL in that case is a false positive; skip it.
+        if not modern_supported and modern_cmds_completed > 0:
             findings.append(Finding(
                 scan_id=scan_id,
                 check_type=CheckType.WEAK_TLS,
