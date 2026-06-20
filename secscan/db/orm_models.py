@@ -55,6 +55,11 @@ class Target(Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verification_method: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set when an admin manually overrides verification (verification_method="manual_admin").
+    # Records which admin vouched for the target, for accountability.
+    verified_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

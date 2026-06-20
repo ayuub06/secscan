@@ -71,3 +71,8 @@ def _run_migrations() -> None:
         if "verified_at" not in existing_targets:
             conn.execute(text("ALTER TABLE targets ADD COLUMN verified_at DATETIME"))
             conn.commit()
+        if "verified_by_admin_id" not in existing_targets:
+            conn.execute(text(
+                "ALTER TABLE targets ADD COLUMN verified_by_admin_id INTEGER REFERENCES users(id)"
+            ))
+            conn.commit()

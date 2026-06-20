@@ -180,7 +180,7 @@ def _client_dict(client: Client) -> dict:
 
 
 def _target_dict(target: Target) -> dict:
-    return {
+    d: dict = {
         "id": target.id,
         "client_id": target.client_id,
         "scope": target.scope,
@@ -190,9 +190,16 @@ def _target_dict(target: Target) -> dict:
         "verification_token": target.verification_token,
         "verified": target.verified,
         "verification_method": target.verification_method,
+        "verified_by_admin_id": target.verified_by_admin_id,
         "verified_at": _fmt_dt(target.verified_at),
         "created_at": _fmt_dt(target.created_at),
     }
+    if target.verification_method == "manual_admin":
+        d["manual_verification_note"] = (
+            "Ownership was manually verified by an administrator. "
+            "See the audit log (action=target_manually_verified) for the stated reason."
+        )
+    return d
 
 
 def _scan_run_summary(run: ScanRun) -> dict:
@@ -534,9 +541,11 @@ def get_verification_info(target_id):
                 return jsonify({"error": "Forbidden"}), 403
             token = target.verification_token
             domain = target.scope.split(",")[0].strip()
-            result = {
+            result: dict = {
                 "target_id": target.id,
                 "verified": target.verified,
+                "verification_method": target.verification_method,
+                "verified_by_admin_id": target.verified_by_admin_id,
                 "verification_token": token,
                 "dns_instructions": {
                     "record_type": "TXT",
@@ -550,6 +559,11 @@ def get_verification_info(target_id):
                     "note": f"Upload a file at https://{domain}/.well-known/secscan-verify.txt containing exactly the content above, then POST to /verify with {{\"method\": \"file\"}}",
                 },
             }
+            if target.verification_method == "manual_admin":
+                result["manual_verification_note"] = (
+                    "Ownership was manually verified by an administrator. "
+                    "See the audit log (action=target_manually_verified) for the stated reason."
+                )
         finally:
             db.close()
         return jsonify(result), 200
@@ -1035,6 +1049,93 @@ def admin_set_user_role(target_user_id):
         return jsonify(result), 200
     except Exception as exc:
         logger.exception("Error in admin_set_user_role")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/targets/<int:target_id>/manual-verify", methods=["POST"])
+@admin_required
+def admin_manual_verify_target(target_id):
+    """Admin-only: vouch for a target's ownership without DNS/file proof.
+
+    Intended for non-technical clients, bare IPs, or platforms where automated
+    verification is unavailable (e.g. *.vercel.app subdomains with no DNS control).
+    The required 'reason' field must capture the specific evidence seen by the admin
+    (phone call, registrar screenshot, contract reference, etc.) — this can never be
+    a silent rubber stamp, because it replaces a cryptographic proof with a human assertion.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        reason = (data.get("reason") or "").strip()
+        if not reason:
+            return jsonify({"error": "reason is required and must not be empty"}), 400
+
+        admin_user_id = session["user_id"]
+
+        db = SessionLocal()
+        try:
+            target = db.get(Target, target_id)
+            if target is None:
+                return jsonify({"error": "Target not found"}), 404
+
+            target.verified = True
+            target.verification_method = "manual_admin"
+            target.verified_at = datetime.now(timezone.utc)
+            target.verified_by_admin_id = admin_user_id
+            db.commit()
+            db.refresh(target)
+            result = _target_dict(target)
+
+            log_audit_event(
+                user_id=admin_user_id,
+                action="target_manually_verified",
+                resource_type="target",
+                resource_id=target_id,
+                details={
+                    "reason": reason,
+                    "admin_id": admin_user_id,
+                    "target_scope": target.scope,
+                },
+                ip_address=request.remote_addr,
+            )
+        finally:
+            db.close()
+
+        return jsonify(result), 200
+
+    except Exception as exc:
+        logger.exception("Error in admin_manual_verify_target %d", target_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/targets/unverified", methods=["GET"])
+@admin_required
+def admin_list_unverified_targets():
+    """Admin worklist: all targets still awaiting verification across the whole platform."""
+    try:
+        db = SessionLocal()
+        try:
+            targets = (
+                db.query(Target)
+                .filter(Target.verified == False)  # noqa: E712
+                .order_by(Target.created_at.asc())
+                .all()
+            )
+            result = [
+                {
+                    "id": t.id,
+                    "scope": t.scope,
+                    "client_id": t.client_id,
+                    "client_name": t.client.name,
+                    "owner_email": t.client.user.email if t.client.user else None,
+                    "created_at": _fmt_dt(t.created_at),
+                }
+                for t in targets
+            ]
+        finally:
+            db.close()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.exception("Error in admin_list_unverified_targets")
         return jsonify({"error": str(exc)}), 500
 
 
