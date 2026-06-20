@@ -46,6 +46,11 @@ def _run_migrations() -> None:
     """Idempotent inline migrations for schema changes that create_all() can't apply
     to pre-existing tables (SQLite does not support ALTER COLUMN or DROP COLUMN)."""
     with engine.connect() as conn:
+        existing_users = {col["name"] for col in inspect(engine).get_columns("users")}
+        if "role" not in existing_users:
+            conn.execute(text("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'customer'"))
+            conn.commit()
+
         existing_clients = {col["name"] for col in inspect(engine).get_columns("clients")}
         if "user_id" not in existing_clients:
             conn.execute(text("ALTER TABLE clients ADD COLUMN user_id INTEGER REFERENCES users(id)"))

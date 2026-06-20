@@ -20,6 +20,9 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import func as sa_func
+
 # Add secscan/ package root to sys.path so sibling packages (checks, core, db)
 # resolve correctly regardless of where this script is invoked from.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,13 +42,12 @@ from authlib.integrations.flask_client import OAuth
 from flask import Flask, jsonify, redirect, request, session
 from flask_cors import CORS
 
-from checks import admin_panels, cve_lookup, dns_check, http_headers, port_scan, tls_check
-from core.orchestrator import ScanOrchestrator
-from core.target import UnauthorizedScanError
+from core.scan_runner import execute_scan
 from core.verification import check_dns_verification, check_file_verification
 from db.database import SessionLocal, init_db
 from db.orm_models import Client, ScanRun, Target
 from db.user_model import User  # must be imported before init_db() so Base.metadata knows about users table
+from scheduler import start_scheduler, sync_schedules
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
@@ -71,6 +73,11 @@ logger = logging.getLogger("secscan.web")
 
 # User model is already imported above, so Base.metadata includes the users table.
 init_db()
+# In Werkzeug's reloader the outer watcher sets WERKZEUG_RUN_MAIN=true in the
+# child before exec'ing it.  Start the scheduler only in the child (or in
+# production where the reloader is not used and app.debug is False).
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+    start_scheduler()
 
 # ── OAuth ────────────────────────────────────────────────────────────────────
 
@@ -90,6 +97,24 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if "user_id" not in session:
             return jsonify({"error": "Authentication required"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def admin_required(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        db = SessionLocal()
+        try:
+            user = db.get(User, user_id)
+            is_admin = user is not None and user.role == "admin"
+        finally:
+            db.close()
+        if not is_admin:
+            return jsonify({"error": "Admin access required"}), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -137,56 +162,9 @@ def _scan_run_summary(run: ScanRun) -> dict:
     }
 
 
-# ── Background scan worker ───────────────────────────────────────────────────
-
-def _run_scan_background(
-    scan_run_id: int,
-    target_scope: list[str],
-    authorized_by: str,
-    skip_cve: bool,
-) -> None:
-    """Executes in a daemon thread — owns its own DB session."""
-    db = SessionLocal()
-    try:
-        scan_run = db.get(ScanRun, scan_run_id)
-        scan_run.status = "running"
-        scan_run.started_at = datetime.now(timezone.utc)
-        db.commit()
-
-        orchestrator = ScanOrchestrator(
-            target_scope=target_scope,
-            authorized_by=authorized_by,
-        )
-        orchestrator.register_check("port_scan",    port_scan.run)
-        orchestrator.register_check("tls_check",    tls_check.run)
-        orchestrator.register_check("http_headers", http_headers.run)
-        orchestrator.register_check("dns_check",    dns_check.run)
-        orchestrator.register_check("admin_panels", admin_panels.run)
-        if not skip_cve:
-            orchestrator.register_check("cve_lookup", cve_lookup.run, needs_findings=True)
-
-        scan_result = orchestrator.run()
-
-        scan_run.status = "completed"
-        scan_run.completed_at = datetime.now(timezone.utc)
-        scan_run.result_json = json.dumps(scan_result.to_dict())
-        db.commit()
-        logger.info("Scan run %d completed — %d finding(s)", scan_run_id, len(scan_result.findings))
-
-    except Exception as exc:
-        logger.exception("Scan run %d failed: %s", scan_run_id, exc)
-        try:
-            db.rollback()
-            scan_run = db.get(ScanRun, scan_run_id)
-            if scan_run is not None:
-                scan_run.status = "failed"
-                scan_run.error_message = str(exc)
-                scan_run.completed_at = datetime.now(timezone.utc)
-                db.commit()
-        except Exception:
-            logger.exception("Failed to persist failed status for scan run %d", scan_run_id)
-    finally:
-        db.close()
+# _run_scan_background has been replaced by core.scan_runner.execute_scan,
+# which is called directly from trigger_scan's daemon thread and from the
+# APScheduler jobs in scheduler.py.
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -219,14 +197,24 @@ def google_callback():
         db = SessionLocal()
         try:
             user = db.query(User).filter_by(google_id=google_id).first()
-            if user is None:
+            is_new = user is None
+            if is_new:
                 user = User(google_id=google_id, email=email, name=name)
                 db.add(user)
+                db.flush()  # populate user.id before creating the linked Client
             else:
                 user.email = email
                 user.name = name
             db.commit()
             db.refresh(user)
+
+            # Auto-create a Client for new users. For returning users, create one
+            # only if they have none (handles accounts that pre-date this feature).
+            if not db.query(Client).filter_by(user_id=user.id).first():
+                client_name = (user.name or "").strip() or user.email
+                db.add(Client(name=client_name, contact_email=user.email, user_id=user.id))
+                db.commit()
+
             session["user_id"] = user.id
         finally:
             db.close()
@@ -252,7 +240,7 @@ def auth_me():
             if user is None:
                 session.clear()
                 return jsonify({"error": "User not found"}), 401
-            result = {"id": user.id, "email": user.email, "name": user.name}
+            result = {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
         finally:
             db.close()
 
@@ -566,24 +554,52 @@ def trigger_scan(target_id):
             db.refresh(scan_run)
 
             run_id = scan_run.id
-            scope_list = [s.strip() for s in target.scope.split(",")]
-            authorized_by = target.authorized_by
-            skip_cve = target.skip_cve
         finally:
             db.close()
 
-        thread = threading.Thread(
-            target=_run_scan_background,
-            args=(run_id, scope_list, authorized_by, skip_cve),
-            daemon=True,
-        )
+        thread = threading.Thread(target=execute_scan, args=(run_id,), daemon=True)
         thread.start()
-        logger.info("Scan run %d dispatched for target %d scope=%s", run_id, target_id, scope_list)
+        logger.info("Scan run %d dispatched for target %d", run_id, target_id)
 
         return jsonify({"scan_run_id": run_id, "status": "pending"}), 202
 
     except Exception as exc:
         logger.exception("Error triggering scan for target %d", target_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/targets/<int:target_id>/schedule", methods=["PATCH"])
+@login_required
+def update_target_schedule(target_id):
+    try:
+        data = request.get_json(silent=True) or {}
+        raw = data.get("schedule_cron")
+        schedule_cron: str | None = raw.strip() if isinstance(raw, str) else None
+
+        if schedule_cron:
+            try:
+                CronTrigger.from_crontab(schedule_cron)
+            except Exception as exc:
+                return jsonify({"error": f"Invalid cron expression: {exc}"}), 400
+
+        db = SessionLocal()
+        try:
+            target = db.get(Target, target_id)
+            if target is None:
+                return jsonify({"error": "Target not found"}), 404
+            if target.client.user_id != session["user_id"]:
+                return jsonify({"error": "Forbidden"}), 403
+            target.schedule_cron = schedule_cron or None
+            db.commit()
+            result = _target_dict(target)
+        finally:
+            db.close()
+
+        sync_schedules()
+        return jsonify(result), 200
+
+    except Exception as exc:
+        logger.exception("Error updating schedule for target %d", target_id)
         return jsonify({"error": str(exc)}), 500
 
 
@@ -616,6 +632,216 @@ def get_scan_run(scan_run_id):
 
     except Exception as exc:
         logger.exception("Error fetching scan run %d", scan_run_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── Admin endpoints ──────────────────────────────────────────────────────────
+
+@app.route("/api/admin/users", methods=["GET"])
+@admin_required
+def admin_list_users():
+    try:
+        db = SessionLocal()
+        try:
+            users = db.query(User).order_by(User.id).all()
+            result = [
+                {
+                    "id": u.id,
+                    "email": u.email,
+                    "name": u.name,
+                    "role": u.role,
+                    "created_at": _fmt_dt(u.created_at),
+                    "client_count": len(u.clients),
+                }
+                for u in users
+            ]
+        finally:
+            db.close()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.exception("Error in admin_list_users")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/clients", methods=["GET"])
+@admin_required
+def admin_list_clients():
+    try:
+        db = SessionLocal()
+        try:
+            clients = db.query(Client).order_by(Client.id).all()
+            result = [
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "contact_email": c.contact_email,
+                    "user_id": c.user_id,
+                    "owner_email": c.user.email if c.user else None,
+                    "target_count": len(c.targets),
+                    "created_at": _fmt_dt(c.created_at),
+                }
+                for c in clients
+            ]
+        finally:
+            db.close()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.exception("Error in admin_list_clients")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/targets", methods=["GET"])
+@admin_required
+def admin_list_targets():
+    try:
+        db = SessionLocal()
+        try:
+            targets = db.query(Target).order_by(Target.id).all()
+            result = [
+                {
+                    "id": t.id,
+                    "scope": t.scope,
+                    "verified": t.verified,
+                    "client_id": t.client_id,
+                    "client_name": t.client.name,
+                    "owner_email": t.client.user.email if t.client.user else None,
+                    "scan_count": len(t.scan_runs),
+                    "created_at": _fmt_dt(t.created_at),
+                }
+                for t in targets
+            ]
+        finally:
+            db.close()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.exception("Error in admin_list_targets")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/scans", methods=["GET"])
+@admin_required
+def admin_list_scans():
+    try:
+        try:
+            page = max(1, int(request.args.get("page", 1)))
+            per_page = min(200, max(1, int(request.args.get("per_page", 50))))
+        except (ValueError, TypeError):
+            return jsonify({"error": "page and per_page must be integers"}), 400
+
+        db = SessionLocal()
+        try:
+            total = db.query(ScanRun).count()
+            runs = (
+                db.query(ScanRun)
+                .order_by(ScanRun.id.desc())
+                .offset((page - 1) * per_page)
+                .limit(per_page)
+                .all()
+            )
+            result = []
+            for r in runs:
+                target = r.target
+                client = target.client
+                result.append({
+                    "id": r.id,
+                    "scan_id": r.scan_id,
+                    "status": r.status,
+                    "started_at": _fmt_dt(r.started_at),
+                    "completed_at": _fmt_dt(r.completed_at),
+                    "target_id": r.target_id,
+                    "target_scope": target.scope,
+                    "client_id": client.id,
+                    "client_name": client.name,
+                    "owner_email": client.user.email if client.user else None,
+                })
+        finally:
+            db.close()
+        return jsonify({"page": page, "per_page": per_page, "total": total, "scans": result}), 200
+    except Exception as exc:
+        logger.exception("Error in admin_list_scans")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/stats", methods=["GET"])
+@admin_required
+def admin_stats():
+    try:
+        db = SessionLocal()
+        try:
+            total_users = db.query(sa_func.count(User.id)).scalar()
+            total_clients = db.query(sa_func.count(Client.id)).scalar()
+            total_targets = db.query(sa_func.count(Target.id)).scalar()
+            total_verified_targets = (
+                db.query(sa_func.count(Target.id)).filter(Target.verified == True).scalar()
+            )
+            total_scans = db.query(sa_func.count(ScanRun.id)).scalar()
+
+            scans_by_status = {"completed": 0, "failed": 0, "running": 0, "pending": 0}
+            for status, count in (
+                db.query(ScanRun.status, sa_func.count(ScanRun.id))
+                .group_by(ScanRun.status)
+                .all()
+            ):
+                if status in scans_by_status:
+                    scans_by_status[status] = count
+
+            # Sum severity counts from each completed scan's stored summary dict.
+            # NOTE: This is O(n_completed_scans) and loads all result_json blobs into
+            # memory. If this becomes a bottleneck, add a denormalized findings table
+            # (or cache summary counts on ScanRun) to avoid full-scan JSON parsing on
+            # every admin request.
+            findings_by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+            for (result_json,) in (
+                db.query(ScanRun.result_json)
+                .filter(ScanRun.status == "completed", ScanRun.result_json.isnot(None))
+                .all()
+            ):
+                try:
+                    summary = json.loads(result_json).get("summary", {})
+                    for sev, cnt in summary.items():
+                        if sev in findings_by_severity:
+                            findings_by_severity[sev] += cnt
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+        finally:
+            db.close()
+
+        return jsonify({
+            "total_users": total_users,
+            "total_clients": total_clients,
+            "total_targets": total_targets,
+            "total_verified_targets": total_verified_targets,
+            "total_scans": total_scans,
+            "scans_by_status": scans_by_status,
+            "findings_by_severity": findings_by_severity,
+        }), 200
+    except Exception as exc:
+        logger.exception("Error in admin_stats")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/users/<int:target_user_id>/role", methods=["POST"])
+@admin_required
+def admin_set_user_role(target_user_id):
+    try:
+        data = request.get_json(silent=True) or {}
+        role = data.get("role")
+        if role not in ("admin", "customer"):
+            return jsonify({"error": "role must be 'admin' or 'customer'"}), 400
+
+        db = SessionLocal()
+        try:
+            user = db.get(User, target_user_id)
+            if user is None:
+                return jsonify({"error": "User not found"}), 404
+            user.role = role
+            db.commit()
+            result = {"id": user.id, "email": user.email, "role": user.role}
+        finally:
+            db.close()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.exception("Error in admin_set_user_role")
         return jsonify({"error": str(exc)}), 500
 
 

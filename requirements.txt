@@ -11,3 +11,4 @@ rich
 flask
 flask-cors
 authlib
+apscheduler
