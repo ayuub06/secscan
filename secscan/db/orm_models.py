@@ -89,3 +89,34 @@ class ScanRun(Base):
 
     def __repr__(self) -> str:
         return f"<ScanRun id={self.id} scan_id={self.scan_id!r} status={self.status!r}>"
+
+
+class AuditLog(Base):
+    """Immutable record of security-relevant actions taken through the API.
+
+    Migration note: this is a NEW table (not new columns on an existing table).
+    SQLAlchemy's Base.metadata.create_all() handles new tables automatically via
+    "CREATE TABLE IF NOT EXISTS" — no ALTER TABLE migration code is needed here.
+    The _run_migrations() function in database.py is only required for adding
+    columns to pre-existing tables, which SQLite cannot do via create_all().
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Nullable: pre-login events (e.g. rate-limit hits by anonymous users) have no user_id.
+    # Intentionally NOT a ForeignKey so that deleted users' audit history is preserved.
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    resource_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    resource_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # JSON-serialized dict with action-specific context (e.g. old/new role, scope, etc.)
+    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AuditLog id={self.id} action={self.action!r} user_id={self.user_id}>"

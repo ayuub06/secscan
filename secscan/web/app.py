@@ -17,10 +17,13 @@ import logging
 import os
 import sys
 import threading
+import time as _time
 import uuid
 from datetime import datetime, timezone
 
 from apscheduler.triggers.cron import CronTrigger
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from sqlalchemy import func as sa_func
 
 # Add secscan/ package root to sys.path so sibling packages (checks, core, db)
@@ -45,8 +48,9 @@ from flask_cors import CORS
 from core.diff import compare_scans
 from core.scan_runner import execute_scan
 from core.verification import check_dns_verification, check_file_verification
+from db.audit import log_audit_event
 from db.database import SessionLocal, init_db
-from db.orm_models import Client, ScanRun, Target
+from db.orm_models import AuditLog, Client, ScanRun, Target
 from db.user_model import User  # must be imported before init_db() so Base.metadata knows about users table
 from scheduler import start_scheduler, sync_schedules
 
@@ -73,12 +77,51 @@ logging.basicConfig(
 logger = logging.getLogger("secscan.web")
 
 # User model is already imported above, so Base.metadata includes the users table.
+# AuditLog is a NEW table; create_all() handles it automatically (no ALTER TABLE needed).
 init_db()
 # In Werkzeug's reloader the outer watcher sets WERKZEUG_RUN_MAIN=true in the
 # child before exec'ing it.  Start the scheduler only in the child (or in
 # production where the reloader is not used and app.debug is False).
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
     start_scheduler()
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+
+def _limiter_key() -> str:
+    """Use the logged-in user's id as the rate-limit key; fall back to IP for
+    unauthenticated requests (health check, OAuth redirect)."""
+    user_id = session.get("user_id")
+    return f"user:{user_id}" if user_id else get_remote_address()
+
+
+def _ratelimit_on_breach(request_limit) -> "Response":  # type: ignore[name-defined]
+    """Return a JSON 429 response and write an audit log entry."""
+    retry_after = max(0, request_limit.reset_at - int(_time.time()))
+    log_audit_event(
+        user_id=session.get("user_id"),
+        action="rate_limit_exceeded",
+        details={"endpoint": request.path},
+        ip_address=request.remote_addr,
+    )
+    resp = jsonify({
+        "error": "Rate limit exceeded. Please try again later.",
+        "retry_after_seconds": retry_after,
+    })
+    resp.status_code = 429
+    return resp
+
+
+# In-memory storage is appropriate for a single-process deployment.
+# For multi-process production (e.g. multiple gunicorn workers), switch to:
+#   storage_uri="redis://localhost:6379/0"
+limiter = Limiter(
+    key_func=_limiter_key,
+    app=app,
+    default_limits=["200 per hour"],
+    storage_uri="memory://",
+    on_breach=_ratelimit_on_breach,
+)
 
 # ── OAuth ────────────────────────────────────────────────────────────────────
 
@@ -171,6 +214,7 @@ def _scan_run_summary(run: ScanRun) -> dict:
 # ── Health ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/health", methods=["GET"])
+@limiter.exempt
 def health():
     return jsonify({"status": "ok"}), 200
 
@@ -220,6 +264,12 @@ def google_callback():
         finally:
             db.close()
 
+        log_audit_event(
+            user_id=session["user_id"],
+            action="login_success",
+            details={"email": email, "is_new_user": is_new},
+            ip_address=request.remote_addr,
+        )
         logger.info("OAuth callback: session user_id set to %s, redirecting to dashboard", session.get("user_id"))
         return redirect("http://localhost:5173/dashboard")
 
@@ -262,6 +312,7 @@ def logout():
 
 @app.route("/api/clients", methods=["POST"])
 @login_required
+@limiter.limit("30 per hour")
 def create_client():
     try:
         data = request.get_json(silent=True) or {}
@@ -280,6 +331,14 @@ def create_client():
             db.commit()
             db.refresh(client)
             result = _client_dict(client)
+            client_id = client.id
+            log_audit_event(
+                user_id=session["user_id"],
+                action="client_created",
+                resource_type="client",
+                resource_id=client_id,
+                ip_address=request.remote_addr,
+            )
         finally:
             db.close()
 
@@ -346,8 +405,16 @@ def delete_client(client_id):
             client = db.get(Client, client_id)
             if client is None:
                 return jsonify({"error": "Client not found"}), 404
+            client_name = client.name  # capture BEFORE deletion
             db.delete(client)
             db.commit()
+            log_audit_event(
+                user_id=session.get("user_id"),
+                action="client_deleted",
+                resource_id=client_id,
+                details={"name": client_name},
+                ip_address=request.remote_addr,
+            )
         finally:
             db.close()
 
@@ -362,6 +429,7 @@ def delete_client(client_id):
 
 @app.route("/api/targets", methods=["POST"])
 @login_required
+@limiter.limit("30 per hour")
 def create_target():
     try:
         data = request.get_json(silent=True) or {}
@@ -393,6 +461,14 @@ def create_target():
             db.commit()
             db.refresh(target)
             result = _target_dict(target)
+            log_audit_event(
+                user_id=session["user_id"],
+                action="target_created",
+                resource_type="target",
+                resource_id=target.id,
+                details={"scope": target.scope},
+                ip_address=request.remote_addr,
+            )
         finally:
             db.close()
 
@@ -484,19 +560,20 @@ def get_verification_info(target_id):
 
 @app.route("/api/targets/<int:target_id>/verify", methods=["POST"])
 @login_required
+@limiter.limit("20 per hour")
 def verify_target(target_id):
     try:
         data = request.get_json(silent=True) or {}
         method = data.get("method")
 
         db = SessionLocal()
+        verified = False
         try:
             target = db.get(Target, target_id)
             if target is None:
                 return jsonify({"error": "Target not found"}), 404
             if target.client.user_id != session["user_id"]:
                 return jsonify({"error": "Forbidden"}), 403
-
             if method not in ("dns", "file"):
                 return jsonify({"error": "method must be 'dns' or 'file'"}), 400
 
@@ -504,23 +581,34 @@ def verify_target(target_id):
             token = target.verification_token
 
             if method == "dns":
-                success = check_dns_verification(domain, token)
+                verified = check_dns_verification(domain, token)
             else:
-                success = check_file_verification(domain, token)
+                verified = check_file_verification(domain, token)
 
-            if success:
+            if verified:
                 target.verified = True
                 target.verification_method = method
                 target.verified_at = datetime.now(timezone.utc)
                 db.commit()
-                return jsonify({"verified": True, "method": method}), 200
-            else:
-                return jsonify({
-                    "verified": False,
-                    "message": "Verification check failed, please ensure the DNS record or file is correctly set up and try again.",
-                }), 200
+
+            # Log every attempt (success or failure) — the result is in details.
+            log_audit_event(
+                user_id=session["user_id"],
+                action="verification_attempted",
+                resource_type="target",
+                resource_id=target_id,
+                details={"method": method, "result": "success" if verified else "failed"},
+                ip_address=request.remote_addr,
+            )
         finally:
             db.close()
+
+        if verified:
+            return jsonify({"verified": True, "method": method}), 200
+        return jsonify({
+            "verified": False,
+            "message": "Verification check failed, please ensure the DNS record or file is correctly set up and try again.",
+        }), 200
     except Exception as exc:
         logger.exception("Error verifying target %d", target_id)
         return jsonify({"error": str(exc)}), 500
@@ -528,6 +616,7 @@ def verify_target(target_id):
 
 @app.route("/api/targets/<int:target_id>/scan", methods=["POST"])
 @login_required
+@limiter.limit("5 per hour")
 def trigger_scan(target_id):
     try:
         db = SessionLocal()
@@ -553,8 +642,15 @@ def trigger_scan(target_id):
             db.add(scan_run)
             db.commit()
             db.refresh(scan_run)
-
             run_id = scan_run.id
+
+            log_audit_event(
+                user_id=session["user_id"],
+                action="scan_triggered",
+                resource_type="target",
+                resource_id=target_id,
+                ip_address=request.remote_addr,
+            )
         finally:
             db.close()
 
@@ -918,14 +1014,77 @@ def admin_set_user_role(target_user_id):
             user = db.get(User, target_user_id)
             if user is None:
                 return jsonify({"error": "User not found"}), 404
+            old_role = user.role
             user.role = role
             db.commit()
             result = {"id": user.id, "email": user.email, "role": user.role}
+            log_audit_event(
+                user_id=session["user_id"],
+                action="role_changed",
+                resource_type="user",
+                resource_id=target_user_id,
+                details={
+                    "old_role": old_role,
+                    "new_role": role,
+                    "changed_by_user_id": session["user_id"],
+                },
+                ip_address=request.remote_addr,
+            )
         finally:
             db.close()
         return jsonify(result), 200
     except Exception as exc:
         logger.exception("Error in admin_set_user_role")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/admin/audit-log", methods=["GET"])
+@admin_required
+def admin_audit_log():
+    try:
+        try:
+            page = max(1, int(request.args.get("page", 1)))
+            per_page = min(200, max(1, int(request.args.get("per_page", 50))))
+        except (ValueError, TypeError):
+            return jsonify({"error": "page and per_page must be integers"}), 400
+
+        filter_user_id = request.args.get("user_id", type=int)
+        filter_action = request.args.get("action")
+
+        db = SessionLocal()
+        try:
+            q = db.query(AuditLog).order_by(AuditLog.id.desc())
+            if filter_user_id is not None:
+                q = q.filter(AuditLog.user_id == filter_user_id)
+            if filter_action:
+                q = q.filter(AuditLog.action == filter_action)
+
+            total = q.count()
+            entries = q.offset((page - 1) * per_page).limit(per_page).all()
+
+            result = []
+            for e in entries:
+                user_email = None
+                if e.user_id is not None:
+                    u = db.get(User, e.user_id)
+                    user_email = u.email if u else None
+                result.append({
+                    "id": e.id,
+                    "user_id": e.user_id,
+                    "user_email": user_email,
+                    "action": e.action,
+                    "resource_type": e.resource_type,
+                    "resource_id": e.resource_id,
+                    "details": json.loads(e.details) if e.details else None,
+                    "ip_address": e.ip_address,
+                    "created_at": _fmt_dt(e.created_at),
+                })
+        finally:
+            db.close()
+
+        return jsonify({"page": page, "per_page": per_page, "total": total, "entries": result}), 200
+    except Exception as exc:
+        logger.exception("Error in admin_audit_log")
         return jsonify({"error": str(exc)}), 500
 
 
