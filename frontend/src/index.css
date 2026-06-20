@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+/* ── Print styles for PDF export ── */
+@media print {
+  .no-print { display: none !important; }
+  body { background: white !important; }
+  #root { border: none !important; max-width: 100% !important; width: 100% !important; }
+  .print-full { width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; }
+}

@@ -51,8 +51,8 @@ from db.user_model import User  # must be imported before init_db() so Base.meta
 
 app = Flask(__name__)
 # supports_credentials=True is required so browsers send the session cookie
-# with cross-origin requests from the React frontend (localhost:3000).
-CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
+# with cross-origin requests from the React frontend (localhost:5173).
+CORS(app, supports_credentials=True, origins=["http://localhost:5173"])
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
 # Without these, Flask defaults to SameSite=None (or browser-dependent) and
 # Secure=True in some configurations. On http://localhost (no TLS), Secure=True
@@ -232,7 +232,7 @@ def google_callback():
             db.close()
 
         logger.info("OAuth callback: session user_id set to %s, redirecting to dashboard", session.get("user_id"))
-        return redirect("http://localhost:3000/dashboard")
+        return redirect("http://localhost:5173/dashboard")
 
     except Exception as exc:
         logger.exception("OAuth callback failed")
