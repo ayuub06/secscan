@@ -42,6 +42,7 @@ from authlib.integrations.flask_client import OAuth
 from flask import Flask, jsonify, redirect, request, session
 from flask_cors import CORS
 
+from core.diff import compare_scans
 from core.scan_runner import execute_scan
 from core.verification import check_dns_verification, check_file_verification
 from db.database import SessionLocal, init_db
@@ -632,6 +633,89 @@ def get_scan_run(scan_run_id):
 
     except Exception as exc:
         logger.exception("Error fetching scan run %d", scan_run_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── Scan diff endpoints ──────────────────────────────────────────────────────
+
+@app.route("/api/targets/<int:target_id>/diff", methods=["GET"])
+@login_required
+def scan_diff(target_id):
+    try:
+        old_id = request.args.get("old_scan_id", type=int)
+        new_id = request.args.get("new_scan_id", type=int)
+        if old_id is None or new_id is None:
+            return jsonify({"error": "old_scan_id and new_scan_id query params are required"}), 400
+
+        db = SessionLocal()
+        try:
+            target = db.get(Target, target_id)
+            if target is None:
+                return jsonify({"error": "Target not found"}), 404
+            if target.client.user_id != session["user_id"]:
+                return jsonify({"error": "Forbidden"}), 403
+
+            old_run = db.get(ScanRun, old_id)
+            new_run = db.get(ScanRun, new_id)
+
+            for run, run_id in ((old_run, old_id), (new_run, new_id)):
+                if run is None:
+                    return jsonify({"error": f"ScanRun {run_id} not found"}), 404
+                if run.target_id != target_id:
+                    return jsonify({"error": f"ScanRun {run_id} does not belong to target {target_id}"}), 400
+                if run.status != "completed":
+                    return jsonify({"error": "Both scans must be completed to compare"}), 400
+
+            old_result = json.loads(old_run.result_json)
+            new_result = json.loads(new_run.result_json)
+        finally:
+            db.close()
+
+        return jsonify(compare_scans(old_result, new_result)), 200
+
+    except Exception as exc:
+        logger.exception("Error diffing scans for target %d", target_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/targets/<int:target_id>/latest-diff", methods=["GET"])
+@login_required
+def latest_diff(target_id):
+    try:
+        db = SessionLocal()
+        try:
+            target = db.get(Target, target_id)
+            if target is None:
+                return jsonify({"error": "Target not found"}), 404
+            if target.client.user_id != session["user_id"]:
+                return jsonify({"error": "Forbidden"}), 403
+
+            completed_runs = (
+                db.query(ScanRun)
+                .filter_by(target_id=target_id, status="completed")
+                .order_by(ScanRun.completed_at.desc())
+                .limit(2)
+                .all()
+            )
+
+            if len(completed_runs) < 2:
+                return jsonify({
+                    "message": (
+                        f"Need at least 2 completed scans to show a diff. "
+                        f"Currently have: {len(completed_runs)}"
+                    )
+                }), 200
+
+            # completed_runs[0] is newer (desc order), [1] is older — compare older -> newer.
+            old_result = json.loads(completed_runs[1].result_json)
+            new_result = json.loads(completed_runs[0].result_json)
+        finally:
+            db.close()
+
+        return jsonify(compare_scans(old_result, new_result)), 200
+
+    except Exception as exc:
+        logger.exception("Error computing latest diff for target %d", target_id)
         return jsonify({"error": str(exc)}), 500
 
 
