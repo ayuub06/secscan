@@ -208,6 +208,19 @@ def _check_zone_transfer(
             )
 
 
+def _domain_resolves(domain: str) -> bool:
+    """Return True if the bare domain resolves to at least one A, AAAA, or NS record."""
+    for rdtype in ("A", "AAAA", "NS"):
+        try:
+            dns.resolver.resolve(domain, rdtype, lifetime=10)
+            return True
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            continue
+        except Exception:
+            continue
+    return False
+
+
 def run(target_scope: list[str], scan_id: str = "") -> list[Finding]:
     """Query DNS records for each domain target and return security findings."""
     findings: list[Finding] = []
@@ -222,6 +235,31 @@ def run(target_scope: list[str], scan_id: str = "") -> list[Finding]:
             continue
 
         try:
+            if not _domain_resolves(target):
+                logger.info(
+                    "dns_check: %r does not resolve — skipping sub-checks, adding single INFO finding.",
+                    target,
+                )
+                findings.append(Finding(
+                    scan_id=scan_id,
+                    check_type=CheckType.DNS_MISCONFIG,
+                    target=target,
+                    port=None,
+                    title="Domain does not resolve",
+                    description=(
+                        "This domain could not be resolved via DNS — it may not exist, "
+                        "be misspelled, or be temporarily unavailable. "
+                        "No further DNS checks were performed."
+                    ),
+                    severity=Severity.INFO,
+                    evidence=f"A, AAAA, and NS lookups all failed for {target!r}.",
+                    remediation=(
+                        "Verify the domain name is spelled correctly and that it is "
+                        "registered and has at least one DNS record."
+                    ),
+                ))
+                continue
+
             _check_spf(target, target, scan_id, findings)
             _check_dmarc(target, target, scan_id, findings)
             _check_dkim(target, target, scan_id, findings)

@@ -357,11 +357,12 @@ def create_client():
 
 
 @app.route("/api/clients", methods=["GET"])
+@login_required
 def list_clients():
     try:
         db = SessionLocal()
         try:
-            clients = db.query(Client).all()
+            clients = db.query(Client).filter_by(user_id=session["user_id"]).all()
             result = [_client_dict(c) for c in clients]
         finally:
             db.close()
@@ -457,11 +458,13 @@ def create_target():
             if client is None:
                 return jsonify({"error": f"Client {client_id} not found"}), 404
 
+            raw_cron = data.get("schedule_cron")
+            schedule_cron = raw_cron.strip() if isinstance(raw_cron, str) else None
             target = Target(
                 client_id=client_id,
                 scope=scope,
                 authorized_by=authorized_by,
-                schedule_cron=data.get("schedule_cron"),
+                schedule_cron=schedule_cron or None,
                 skip_cve=bool(data.get("skip_cve", False)),
             )
             db.add(target)

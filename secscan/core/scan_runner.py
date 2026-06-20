@@ -10,6 +10,13 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
+
+# Both are raised when an ORM row disappears while we hold a reference to it:
+# - StaleDataError: UPDATE matched 0 rows (row deleted by another process/session)
+# - ObjectDeletedError: SQLAlchemy can't reload expired attributes because the row is gone
+_DeletedDuringScan = (StaleDataError, ObjectDeletedError)
+
 from checks import admin_panels, cve_lookup, dns_check, http_headers, port_scan, tls_check
 from core.orchestrator import ScanOrchestrator
 from db.database import SessionLocal
@@ -38,7 +45,14 @@ def execute_scan(scan_run_id: int) -> None:
 
         scan_run.status = "running"
         scan_run.started_at = datetime.now(timezone.utc)
-        db.commit()
+        try:
+            db.commit()
+        except _DeletedDuringScan:
+            logger.warning(
+                "Scan run %d: target was deleted before scan could start — aborting.",
+                scan_run_id,
+            )
+            return
 
         orchestrator = ScanOrchestrator(
             target_scope=scope_list,
@@ -54,13 +68,20 @@ def execute_scan(scan_run_id: int) -> None:
 
         scan_result = orchestrator.run()
 
-        scan_run.status = "completed"
-        scan_run.completed_at = datetime.now(timezone.utc)
-        scan_run.result_json = json.dumps(scan_result.to_dict())
-        db.commit()
-        logger.info(
-            "Scan run %d completed — %d finding(s)", scan_run_id, len(scan_result.findings)
-        )
+        try:
+            scan_run.status = "completed"
+            scan_run.completed_at = datetime.now(timezone.utc)
+            scan_run.result_json = json.dumps(scan_result.to_dict())
+            db.commit()
+            logger.info(
+                "Scan run %d completed — %d finding(s)", scan_run_id, len(scan_result.findings)
+            )
+        except _DeletedDuringScan:
+            logger.warning(
+                "Scan run %d: target was deleted while scan was running — "
+                "results discarded cleanly (scan completed but could not be saved).",
+                scan_run_id,
+            )
 
     except Exception as exc:
         logger.exception("Scan run %d failed: %s", scan_run_id, exc)
